@@ -169,24 +169,21 @@ else:
     # ✅ FIXED PATENTS SECTION
     st.subheader("📜 Patents")
 
-    patent_cat_col = get_column(df, ["patent category"])
+# Filter patents
+patents = df[
+    df["Publication Category"].astype(str)
+    .str.contains("Patent", case=False, na=False)
+]
 
-    patents = df[
-        df["Publication Category"].astype(str)
-        .str.contains("Patent", case=False, na=False)
-    ]
+for _, row in patents.iterrows():
 
-    for _, row in patents.iterrows():
-        title = row["Publication Title"]
+    # ✅ FORCE TITLE COLUMN ONLY
+    title = row[title_col] if title_col else "N/A"
 
-        category = (
-            row[patent_cat_col]
-            if patent_cat_col and patent_cat_col in df.columns
-            else "N/A"
-        )
+    # ✅ FORCE PATENT CATEGORY
+    category = row[patent_cat_col] if patent_cat_col else "N/A"
 
-        st.write(f"• {title}  |  Category: {category}")
-
+    st.write(f"• {title}  |  Category: {category}")
     st.subheader("🎓 Workshops / Seminars")
 
     events = df[df["Publication Category"].astype(str).str.contains("Workshop|Seminar", case=False, na=False)]
