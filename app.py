@@ -167,28 +167,25 @@ else:
         st.write("•", row["Publication Title"])
 
     # ✅ FIXED PATENTS SECTION
-   st.subheader("📜 Patents")
+    st.subheader("📜 Patents")
 
-# Detect patent category column (your Excel has "Patent Category")
-patent_cat_col = get_column(df, ["patent category"])
+    patent_cat_col = get_column(df, ["patent category"])
 
-# Filter only patents
-patents = df[
-    df["Publication Category"].astype(str)
-    .str.contains("Patent", case=False, na=False)
-]
+    patents = df[
+        df["Publication Category"].astype(str)
+        .str.contains("Patent", case=False, na=False)
+    ]
 
-# Display Title + Category (NOT authors)
-for _, row in patents.iterrows():
-    title = row["Publication Title"]
+    for _, row in patents.iterrows():
+        title = row["Publication Title"]
 
-    category = (
-        row[patent_cat_col]
-        if patent_cat_col and patent_cat_col in df.columns
-        else "N/A"
-    )
+        category = (
+            row[patent_cat_col]
+            if patent_cat_col and patent_cat_col in df.columns
+            else "N/A"
+        )
 
-    st.write(f"• {title}  |  Category: {category}")
+        st.write(f"• {title}  |  Category: {category}")
 
     st.subheader("🎓 Workshops / Seminars")
 
