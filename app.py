@@ -61,7 +61,7 @@ if page == "All":
     col1.metric("Total Records", len(df_all))
     col2.metric("Total Faculty", df_all["Faculty"].nunique())
 
-    # 📈 TREND (START FROM 2022)
+    # 📈 TREND
     st.subheader("📈 Publication Trend")
 
     df_trend = df_all.dropna(subset=["Publication Year"]).copy()
@@ -97,39 +97,6 @@ if page == "All":
 
     fig3 = px.bar(df_fac, x="Faculty", y="Count")
     st.plotly_chart(fig3, use_container_width=True)
-
-    # 🔥 HEATMAP (START FROM 2022)
-    st.subheader("🔥 Faculty Heatmap")
-
-    df_heat = df_all.dropna(subset=["Publication Year"]).copy()
-    df_heat = df_heat[df_heat["Publication Year"] >= 2022]
-
-    if not df_heat.empty:
-        df_heat["Publication Year"] = df_heat["Publication Year"].astype(int)
-
-        heatmap = df_heat.pivot_table(
-            index="Faculty",
-            columns="Publication Year",
-            values="Count",
-            aggfunc="sum",
-            fill_value=0
-        )
-
-        fig4 = px.imshow(heatmap, text_auto=True, aspect="auto")
-        st.plotly_chart(fig4, use_container_width=True)
-
-    # 💰 GRANTS
-    st.subheader("💰 Grants / Funding")
-
-    df_grants = df_all[
-        df_all["Publication Category"].astype(str)
-        .str.contains("Grant|Funding", case=False, na=False)
-    ]
-
-    if not df_grants.empty:
-        df_grants = df_grants.groupby("Faculty")["Count"].sum().reset_index()
-        figg = px.bar(df_grants, x="Faculty", y="Count")
-        st.plotly_chart(figg, use_container_width=True)
 
 # ------------------ INDIVIDUAL PAGE ------------------
 
@@ -199,15 +166,25 @@ else:
     for _, row in achievements.iterrows():
         st.write("•", row["Publication Title"])
 
+    # ✅ FIXED PATENTS SECTION
     st.subheader("📜 Patents")
 
     patent_cat_col = get_column(df, ["patent category"])
 
-    patents = df[df["Publication Category"].astype(str).str.contains("Patent", case=False, na=False)]
+    patents = df[
+        df["Publication Category"].astype(str)
+        .str.contains("Patent", case=False, na=False)
+    ]
 
     for _, row in patents.iterrows():
         title = row["Publication Title"]
-        category = row[patent_cat_col] if patent_cat_col and patent_cat_col in df.columns else "N/A"
+
+        category = (
+            row[patent_cat_col]
+            if patent_cat_col and patent_cat_col in df.columns
+            else "N/A"
+        )
+
         st.write(f"• {title}  |  Category: {category}")
 
     st.subheader("🎓 Workshops / Seminars")
