@@ -35,13 +35,13 @@ def get_column(df, keywords):
 
 def extract_patents(sheet_name):
     """
-    Re-reads the raw sheet (no header skip) and locates the patent sub-table
-    by finding the row that contains 'Patent Category' as a cell value.
-    Returns a DataFrame with columns: Year, Patent Category, Title, List of Inventors.
+    Re-reads the raw sheet to locate the patent sub-table by finding the row
+    that contains 'Patent Category', then collects only contiguous data rows
+    below it (stops at the first fully-blank row).
     """
     raw = pd.read_excel(file, sheet_name=sheet_name, header=None)
 
-    # Find the row index where the patent sub-header lives
+    # Step 1: find the patent sub-header row
     header_row_idx = None
     for i, row in raw.iterrows():
         for cell in row.values:
@@ -54,36 +54,41 @@ def extract_patents(sheet_name):
     if header_row_idx is None:
         return pd.DataFrame()
 
-    # Extract only the columns that have values in the header row
+    # Step 2: identify useful columns from the sub-header
     header_row = raw.iloc[header_row_idx]
     valid_cols = [c for c in raw.columns if str(header_row[c]).strip() not in ("nan", "")]
 
-    # Slice data rows below the header
-    patent_data = raw.iloc[header_row_idx + 1:][valid_cols].copy()
-    patent_data.columns = [str(header_row[c]).strip() for c in valid_cols]
-    patent_data = patent_data.dropna(how="all")
+    # Step 3: collect data rows immediately below the sub-header,
+    #         stopping at the first fully-blank row (end of patent block)
+    patent_rows = []
+    for i in range(header_row_idx + 1, len(raw)):
+        row = raw.iloc[i]
+        if row[valid_cols].isna().all():
+            break  # hit blank separator — patent block is done
+        patent_rows.append(row[valid_cols].values)
 
-    # Normalise column names so we can rely on them
-    patent_data.columns = [c.strip() for c in patent_data.columns]
+    if not patent_rows:
+        return pd.DataFrame()
 
-    # Drop rows that look like another header repetition
-    patent_data = patent_data[~patent_data.apply(
-        lambda r: r.astype(str).str.lower().str.contains("patent category").any(), axis=1
-    )]
+    col_names = [str(header_row[c]).strip() for c in valid_cols]
+    patent_data = pd.DataFrame(patent_rows, columns=col_names)
 
-    # Find the Title column (handles "Title" and similar variants)
+    # Step 4: identify the Title and Inventors columns by name
     title_col = None
     inventors_col = None
     for col in patent_data.columns:
-        col_lower = col.lower()
+        col_lower = col.lower().strip()
         if col_lower == "title":
             title_col = col
         elif "inoveter" in col_lower or "inventor" in col_lower:
             inventors_col = col
 
-    # Keep only rows where Title is not blank
+    # Step 5: drop rows where Title is blank
     if title_col:
-        patent_data = patent_data[patent_data[title_col].astype(str).str.strip().replace("nan", "").ne("")]
+        patent_data = patent_data[
+            patent_data[title_col].astype(str).str.strip().str.lower().ne("nan") &
+            patent_data[title_col].astype(str).str.strip().ne("")
+        ]
 
     patent_data["_title_col"] = title_col
     patent_data["_inventors_col"] = inventors_col
