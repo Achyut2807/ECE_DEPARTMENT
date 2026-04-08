@@ -105,7 +105,7 @@ else:
     df = df.dropna(how="all")
     df = clean_columns(df)
 
-    # ------------------ STRICT COLUMN MAPPING ------------------
+    # ------------------ STRICT COLUMN FIX ------------------
 
     title_col = None
     patent_cat_col = None
@@ -115,9 +115,10 @@ else:
     quartile_col = None
 
     for col in df.columns:
-        col_lower = col.lower()
+        col_lower = col.lower().strip()
 
-        if "publication title" in col_lower:
+        # ✅ FIXED: handle both cases
+        if col_lower in ["title", "publication title"]:
             title_col = col
 
         elif "patent category" in col_lower:
@@ -135,7 +136,7 @@ else:
         elif "quartile" in col_lower:
             quartile_col = col
 
-    # ------------------ CREATE CLEAN COLUMNS ------------------
+    # ------------------ CREATE CLEAN DATA ------------------
 
     df["Publication Year"] = pd.to_numeric(df[year_col], errors="coerce") if year_col else None
     df["Publication Category"] = df[cat_col] if cat_col else None
