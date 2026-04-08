@@ -16,108 +16,82 @@ uploaded_file = st.file_uploader("Upload your Excel file", type=["xlsx"])
 if uploaded_file:
 
     # --------------------------
-    # TRY DIFFERENT HEADER LEVELS (AUTO FIX)
+    # LOAD DATA (CORRECT HEADER)
     # --------------------------
-    def load_data(file):
-        for i in range(5):  # try first 5 rows as header
-            try:
-                df = pd.read_excel(file, header=i)
-                df.columns = df.columns.astype(str).str.strip().str.lower()
-
-                # check if meaningful columns exist
-                if any("year" in col for col in df.columns):
-                    return df
-            except:
-                continue
-        return pd.read_excel(file)
-
-    df = load_data(uploaded_file)
+    df = pd.read_excel(uploaded_file, header=0)
 
     # --------------------------
     # CLEAN COLUMN NAMES
     # --------------------------
-    df.columns = df.columns.astype(str).str.strip().str.lower()
+    df.columns = df.columns.str.strip().str.lower()
 
     st.write("Detected Columns:", df.columns.tolist())
 
     # --------------------------
-    # AUTO COLUMN DETECTION
+    # RENAME BASED ON YOUR FILE
     # --------------------------
-    def find_col(keywords):
-        for col in df.columns:
-            for key in keywords:
-                if key in col:
-                    return col
-        return None
-
-    title_col = find_col(["title", "publication"])
-    faculty_col = find_col(["faculty", "author"])
-    year_col = find_col(["year"])
-    category_col = find_col(["category", "type"])
-    status_col = find_col(["status"])
-    quartile_col = find_col(["quartile", "q"])
+    df = df.rename(columns={
+        "publication year": "year",
+        "publication category": "category",
+        "publication title": "title",
+        "name of authors as mentioned in publication": "faculty",
+        "status": "status",
+        "quartile": "quartile"
+    })
 
     # --------------------------
-    # VALIDATION
+    # FIX YEAR COLUMN (IMPORTANT)
     # --------------------------
-    if not year_col:
-        st.error("❌ Could not detect 'Year' column. Please check Excel format.")
-        st.stop()
+    df["year"] = pd.to_numeric(df["year"], errors="coerce")
+    df = df.dropna(subset=["year"])
+    df["year"] = df["year"].astype(int)
 
     # --------------------------
-    # CLEAN DATA
+    # REMOVE EMPTY ROWS
     # --------------------------
-    df = df.dropna(how="all")  # remove empty rows
-
-    if title_col:
-        df = df.dropna(subset=[title_col])
+    df = df.dropna(subset=["title"])
 
     # --------------------------
     # SIDEBAR FILTERS
     # --------------------------
     st.sidebar.header("🔍 Filters")
 
-    if category_col:
-        category = st.sidebar.multiselect(
-            "Category", df[category_col].dropna().unique()
-        )
-    else:
-        category = []
-
-    year = st.sidebar.multiselect(
-        "Year", sorted(df[year_col].dropna().unique())
+    category = st.sidebar.multiselect(
+        "Category",
+        df["category"].dropna().unique()
     )
 
-    if faculty_col:
-        faculty = st.sidebar.multiselect(
-            "Faculty", df[faculty_col].dropna().unique()
-        )
-    else:
-        faculty = []
+    year = st.sidebar.multiselect(
+        "Year",
+        sorted(df["year"].dropna().unique())
+    )
 
-    if status_col:
-        status = st.sidebar.multiselect(
-            "Status", df[status_col].dropna().unique()
-        )
-    else:
-        status = []
+    faculty = st.sidebar.multiselect(
+        "Faculty",
+        df["faculty"].dropna().unique()
+    )
+
+    status = st.sidebar.multiselect(
+        "Status",
+        df["status"].dropna().unique()
+    )
 
     # --------------------------
     # APPLY FILTERS
     # --------------------------
     filtered_df = df.copy()
 
-    if category_col and category:
-        filtered_df = filtered_df[filtered_df[category_col].isin(category)]
+    if category:
+        filtered_df = filtered_df[filtered_df["category"].isin(category)]
 
     if year:
-        filtered_df = filtered_df[filtered_df[year_col].isin(year)]
+        filtered_df = filtered_df[filtered_df["year"].isin(year)]
 
-    if faculty_col and faculty:
-        filtered_df = filtered_df[filtered_df[faculty_col].isin(faculty)]
+    if faculty:
+        filtered_df = filtered_df[filtered_df["faculty"].isin(faculty)]
 
-    if status_col and status:
-        filtered_df = filtered_df[filtered_df[status_col].isin(status)]
+    if status:
+        filtered_df = filtered_df[filtered_df["status"].isin(status)]
 
     # --------------------------
     # METRICS
@@ -125,45 +99,33 @@ if uploaded_file:
     col1, col2, col3, col4 = st.columns(4)
 
     col1.metric("Total Papers", len(filtered_df))
-
-    if category_col:
-        col2.metric("Journals", len(filtered_df[filtered_df[category_col] == "Journal"]))
-        col3.metric("Conferences", len(filtered_df[filtered_df[category_col] == "Conference"]))
-    else:
-        col2.metric("Journals", "N/A")
-        col3.metric("Conferences", "N/A")
-
-    if faculty_col:
-        col4.metric("Faculty", filtered_df[faculty_col].nunique())
-    else:
-        col4.metric("Faculty", "N/A")
+    col2.metric("Journals", len(filtered_df[filtered_df["category"] == "Journal"]))
+    col3.metric("Conferences", len(filtered_df[filtered_df["category"] == "Conference"]))
+    col4.metric("Faculty", filtered_df["faculty"].nunique())
 
     # --------------------------
     # CHARTS
     # --------------------------
     st.subheader("📈 Publications by Year")
-    year_data = filtered_df.groupby(year_col).size().reset_index(name="count")
-    fig1 = px.bar(year_data, x=year_col, y="count")
+    year_data = filtered_df.groupby("year").size().reset_index(name="count")
+    fig1 = px.bar(year_data, x="year", y="count")
     st.plotly_chart(fig1, use_container_width=True)
 
-    if category_col:
-        st.subheader("📊 Category Distribution")
-        fig2 = px.pie(filtered_df, names=category_col)
-        st.plotly_chart(fig2, use_container_width=True)
+    st.subheader("📊 Category Distribution")
+    fig2 = px.pie(filtered_df, names="category")
+    st.plotly_chart(fig2, use_container_width=True)
 
-    if quartile_col:
-        st.subheader("📊 Quartile Distribution")
-        q_data = filtered_df[quartile_col].value_counts().reset_index()
-        q_data.columns = ["quartile", "count"]
-        fig3 = px.bar(q_data, x="quartile", y="count")
-        st.plotly_chart(fig3, use_container_width=True)
+    st.subheader("📊 Quartile Distribution")
+    q_data = filtered_df["quartile"].value_counts().reset_index()
+    q_data.columns = ["quartile", "count"]
+    fig3 = px.bar(q_data, x="quartile", y="count")
+    st.plotly_chart(fig3, use_container_width=True)
 
-    if faculty_col:
-        st.subheader("👨‍🏫 Publications by Faculty")
-        fac_data = filtered_df[faculty_col].value_counts().reset_index()
-        fac_data.columns = ["faculty", "count"]
-        fig4 = px.bar(fac_data, x="faculty", y="count")
-        st.plotly_chart(fig4, use_container_width=True)
+    st.subheader("👨‍🏫 Publications by Faculty")
+    fac_data = filtered_df["faculty"].value_counts().reset_index()
+    fac_data.columns = ["faculty", "count"]
+    fig4 = px.bar(fac_data, x="faculty", y="count")
+    st.plotly_chart(fig4, use_container_width=True)
 
     # --------------------------
     # SEARCH + TABLE
