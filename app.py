@@ -61,7 +61,6 @@ if page == "All":
     col1.metric("Total Records", len(df_all))
     col2.metric("Total Faculty", df_all["Faculty"].nunique())
 
-    # 📈 TREND
     st.subheader("📈 Publication Trend")
 
     df_trend = df_all.dropna(subset=["Publication Year"]).copy()
@@ -76,7 +75,6 @@ if page == "All":
     else:
         st.write("No valid data from 2022 onwards")
 
-    # 📊 CATEGORY
     st.subheader("📊 Journal vs Conference")
 
     df_cat = df_all[
@@ -89,7 +87,6 @@ if page == "All":
         fig2 = px.pie(df_cat, names="Publication Category", values="Count")
         st.plotly_chart(fig2, use_container_width=True)
 
-    # 🏆 FACULTY PRODUCTIVITY
     st.subheader("🏆 Faculty Productivity")
 
     df_fac = df_all.groupby("Faculty")["Count"].sum().reset_index()
@@ -108,11 +105,37 @@ else:
     df = df.dropna(how="all")
     df = clean_columns(df)
 
-    year_col = get_column(df, ["year"])
-    cat_col = get_column(df, ["category"])
-    title_col = get_column(df, ["title"])
-    status_col = get_column(df, ["status"])
-    quartile_col = get_column(df, ["quartile"])
+    # ------------------ STRICT COLUMN MAPPING ------------------
+
+    title_col = None
+    patent_cat_col = None
+    year_col = None
+    cat_col = None
+    status_col = None
+    quartile_col = None
+
+    for col in df.columns:
+        col_lower = col.lower()
+
+        if "publication title" in col_lower:
+            title_col = col
+
+        elif "patent category" in col_lower:
+            patent_cat_col = col
+
+        elif "year" in col_lower:
+            year_col = col
+
+        elif "category" in col_lower:
+            cat_col = col
+
+        elif "status" in col_lower:
+            status_col = col
+
+        elif "quartile" in col_lower:
+            quartile_col = col
+
+    # ------------------ CREATE CLEAN COLUMNS ------------------
 
     df["Publication Year"] = pd.to_numeric(df[year_col], errors="coerce") if year_col else None
     df["Publication Category"] = df[cat_col] if cat_col else None
@@ -141,52 +164,21 @@ else:
 
     with col2:
         st.subheader("📊 Category Distribution")
-        df_cat = df.groupby("Publication Category")["Count"].sum().reset_index()
-        fig2 = px.pie(df_cat, names="Publication Category", values="Count")
+        df_cat_chart = df.groupby("Publication Category")["Count"].sum().reset_index()
+        fig2 = px.pie(df_cat_chart, names="Publication Category", values="Count")
         st.plotly_chart(fig2, use_container_width=True)
-
-    col3, col4 = st.columns(2)
-
-    with col3:
-        st.subheader("📌 Status Analysis")
-        df_status = df.groupby("Status")["Count"].sum().reset_index()
-        fig3 = px.bar(df_status, x="Status", y="Count")
-        st.plotly_chart(fig3, use_container_width=True)
-
-    with col4:
-        st.subheader("🏆 Quartile Analysis")
-        df_q = df.groupby("Quartile")["Count"].sum().reset_index()
-        fig4 = px.bar(df_q, x="Quartile", y="Count")
-        st.plotly_chart(fig4, use_container_width=True)
 
     # ------------------ TEXT SECTIONS ------------------
 
-    st.subheader("🏆 Achievements / Awards")
-    achievements = df[df["Publication Category"].astype(str).str.contains("Award|Achievement", case=False, na=False)]
-    for _, row in achievements.iterrows():
-        st.write("•", row["Publication Title"])
-
-    # ✅ FIXED PATENTS SECTION
     st.subheader("📜 Patents")
 
-# Filter patents
-patents = df[
-    df["Publication Category"].astype(str)
-    .str.contains("Patent", case=False, na=False)
-]
+    patents = df[
+        df["Publication Category"].astype(str)
+        .str.contains("Patent", case=False, na=False)
+    ]
 
-for _, row in patents.iterrows():
+    for _, row in patents.iterrows():
+        title = row[title_col] if title_col else "N/A"
+        category = row[patent_cat_col] if patent_cat_col else "N/A"
 
-    # ✅ FORCE TITLE COLUMN ONLY
-    title = row[title_col] if title_col else "N/A"
-
-    # ✅ FORCE PATENT CATEGORY
-    category = row[patent_cat_col] if patent_cat_col else "N/A"
-
-    st.write(f"• {title}  |  Category: {category}")
-    st.subheader("🎓 Workshops / Seminars")
-
-    events = df[df["Publication Category"].astype(str).str.contains("Workshop|Seminar", case=False, na=False)]
-
-    for _, row in events.iterrows():
-        st.write("•", row["Publication Title"])
+        st.write(f"• {title}  |  Category: {category}")
