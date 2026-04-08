@@ -44,9 +44,11 @@ def extract_patents(sheet_name):
     # Find the row index where the patent sub-header lives
     header_row_idx = None
     for i, row in raw.iterrows():
-        row_str = row.astype(str).str.lower().tolist()
-        if any("patent category" in cell for cell in row_str):
-            header_row_idx = i
+        for cell in row.values:
+            if "patent category" in str(cell).lower():
+                header_row_idx = i
+                break
+        if header_row_idx is not None:
             break
 
     if header_row_idx is None:
