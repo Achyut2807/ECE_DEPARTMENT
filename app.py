@@ -8,7 +8,7 @@ st.title("📊 Publication Dashboard")
 
 file = "Protected_Deparment_FactSheet-2.xlsx"
 
-# Load sheets
+# Load sheets with header=1 (row index 1 as header)
 sheets = pd.read_excel(file, sheet_name=None, header=1)
 
 # ------------------ SIDEBAR ------------------
@@ -28,6 +28,67 @@ def get_column(df, keywords):
                 return col
     return None
 
+# ------------------ PATENT PARSER (FIX) ------------------
+# The patent section in each sheet is an embedded sub-table with its own
+# headers: "Year", "Patent Category", "Title", "List of Inoveters".
+# We detect the sub-header row and re-parse that block independently.
+
+def extract_patents(sheet_name):
+    """
+    Re-reads the raw sheet (no header skip) and locates the patent sub-table
+    by finding the row that contains 'Patent Category' as a cell value.
+    Returns a DataFrame with columns: Year, Patent Category, Title, List of Inventors.
+    """
+    raw = pd.read_excel(file, sheet_name=sheet_name, header=None)
+
+    # Find the row index where the patent sub-header lives
+    header_row_idx = None
+    for i, row in raw.iterrows():
+        row_str = row.astype(str).str.lower().tolist()
+        if any("patent category" in cell for cell in row_str):
+            header_row_idx = i
+            break
+
+    if header_row_idx is None:
+        return pd.DataFrame()
+
+    # Extract only the columns that have values in the header row
+    header_row = raw.iloc[header_row_idx]
+    valid_cols = [c for c in raw.columns if str(header_row[c]).strip() not in ("nan", "")]
+
+    # Slice data rows below the header
+    patent_data = raw.iloc[header_row_idx + 1:][valid_cols].copy()
+    patent_data.columns = [str(header_row[c]).strip() for c in valid_cols]
+    patent_data = patent_data.dropna(how="all")
+
+    # Normalise column names so we can rely on them
+    patent_data.columns = [c.strip() for c in patent_data.columns]
+
+    # Drop rows that look like another header repetition
+    patent_data = patent_data[~patent_data.apply(
+        lambda r: r.astype(str).str.lower().str.contains("patent category").any(), axis=1
+    )]
+
+    # Find the Title column (handles "Title" and similar variants)
+    title_col = None
+    inventors_col = None
+    for col in patent_data.columns:
+        col_lower = col.lower()
+        if col_lower == "title":
+            title_col = col
+        elif "inoveter" in col_lower or "inventor" in col_lower:
+            inventors_col = col
+
+    # Keep only rows where Title is not blank
+    if title_col:
+        patent_data = patent_data[patent_data[title_col].astype(str).str.strip().replace("nan", "").ne("")]
+
+    patent_data["_title_col"] = title_col
+    patent_data["_inventors_col"] = inventors_col
+
+    return patent_data
+
+
 # ------------------ ALL DATA ------------------
 
 all_data = []
@@ -35,7 +96,6 @@ all_data = []
 for name, df_temp in sheets.items():
     df_temp = df_temp.dropna(how="all")
     df_temp = clean_columns(df_temp)
-
     df_temp["Faculty"] = name
 
     year_col = get_column(df_temp, ["year"])
@@ -117,7 +177,6 @@ else:
     for col in df.columns:
         col_lower = col.lower().strip()
 
-        # ✅ FIXED: handle both cases
         if col_lower in ["title", "publication title"]:
             title_col = col
 
@@ -169,17 +228,26 @@ else:
         fig2 = px.pie(df_cat_chart, names="Publication Category", values="Count")
         st.plotly_chart(fig2, use_container_width=True)
 
-    # ------------------ TEXT SECTIONS ------------------
+    # ------------------ PATENTS SECTION (FIXED) ------------------
 
     st.subheader("📜 Patents")
 
-    patents = df[
-        df["Publication Category"].astype(str)
-        .str.contains("Patent", case=False, na=False)
-    ]
+    # Use the dedicated patent extractor that reads the embedded sub-table
+    patents_df = extract_patents(sheet_name)
 
-    for _, row in patents.iterrows():
-        title = row[title_col] if title_col else "N/A"
-        category = row[patent_cat_col] if patent_cat_col else "N/A"
+    if patents_df.empty:
+        st.write("No patents found for this faculty member.")
+    else:
+        title_col_pat = patents_df["_title_col"].iloc[0]
+        inventors_col_pat = patents_df["_inventors_col"].iloc[0]
 
-        st.write(f"• {title}  |  Category: {category}")
+        for _, row in patents_df.iterrows():
+            # ✅ FIX: Read "Title" from the patent sub-table's own "Title" column,
+            #         NOT from the main sheet's "Publication Title" column (which
+            #         was actually aligned with "List of Inoveters" in the sub-table).
+            title = str(row[title_col_pat]).strip() if title_col_pat else "N/A"
+            inventors = str(row[inventors_col_pat]).strip() if inventors_col_pat and inventors_col_pat in row.index else "N/A"
+            category = str(row.get("Patent Category", "N/A")).strip()
+            year = str(row.get("Year", "N/A")).strip()
+
+            st.write(f"• **{title}**  |  Category: {category}  |  Year: {year}  |  Inventors: {inventors}")
