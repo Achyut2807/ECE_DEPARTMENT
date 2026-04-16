@@ -30,12 +30,6 @@ def dedup_cols(cols):
 
 
 def extract_section(df, start_kw, end_kw):
-    """
-    Extract a table section from a faculty sheet.
-    Finds the section header row by start_kw, then the first row with >=3
-    non-null values as the column header, reads until end_kw.
-    Returns a clean DataFrame. Only keeps rows whose first col is an integer.
-    """
     df_str = df.astype(str)
     start = find_row(df_str, start_kw)
     end   = find_row(df_str, end_kw) if end_kw else len(df)
@@ -73,6 +67,18 @@ def safe_vc(series, label="Label"):
     vc = series.value_counts().reset_index()
     vc.columns = [label, "Count"]
     return vc
+
+
+def fmt_inr(amount):
+    """Format a number as Indian currency (₹ with lakhs/crores)."""
+    if pd.isna(amount) or amount == 0:
+        return "₹0"
+    if amount >= 1_00_00_000:
+        return f"₹{amount/1_00_00_000:.2f} Cr"
+    elif amount >= 1_00_000:
+        return f"₹{amount/1_00_000:.2f} L"
+    else:
+        return f"₹{amount:,.0f}"
 
 
 # ──────────────────────────────────────────────
@@ -151,6 +157,12 @@ if PAT_YEAR and not df_pats.empty:
 else:
     f_pats = df_pats.copy()
 
+# ── Compute total grant amount across all faculty ──
+GRANT_AMT_COL = get_col(df_grants, ["grant amount", "amount"]) if not df_grants.empty else None
+total_grant_amount = 0
+if GRANT_AMT_COL and not df_grants.empty:
+    total_grant_amount = pd.to_numeric(df_grants[GRANT_AMT_COL], errors="coerce").fillna(0).sum()
+
 # ──────────────────────────────────────────────
 #  SIDEBAR
 # ──────────────────────────────────────────────
@@ -166,12 +178,13 @@ if view == "📊 Overall Dashboard":
     st.title("📊 ECE Department — Faculty Dashboard (2022 – Present)")
     st.caption("Journals & Conferences only (unless stated) · Source: Protected_Deparment_FactSheet-2.xlsx")
 
-    # KPIs
-    k1, k2, k3, k4 = st.columns(4)
+    # KPIs — now 5 columns to include Total Grant Amount
+    k1, k2, k3, k4, k5 = st.columns(5)
     k1.metric("📄 Publications (J+C, 2022+)", len(f_pubs))
     k2.metric("🔬 Patents (2022+)",            len(f_pats))
     k3.metric("🏦 Grants / Projects",          len(df_grants))
-    k4.metric("👩‍🏫 Faculty Members",            len(all_fac))
+    k4.metric("💰 Total Grant Amount",         fmt_inr(total_grant_amount))
+    k5.metric("👩‍🏫 Faculty Members",            len(all_fac))
 
     st.divider()
 
@@ -199,6 +212,29 @@ if view == "📊 Overall Dashboard":
             st.info("No category data.")
 
     st.divider()
+
+    # Grant Amount by Faculty bar chart
+    if not df_grants.empty and GRANT_AMT_COL:
+        st.subheader("💰 Grant Amount by Faculty")
+        grant_by_fac = (
+            df_grants.copy()
+            .assign(**{GRANT_AMT_COL: pd.to_numeric(df_grants[GRANT_AMT_COL], errors="coerce").fillna(0)})
+            .groupby("Faculty")[GRANT_AMT_COL]
+            .sum()
+            .reset_index()
+            .rename(columns={GRANT_AMT_COL: "Grant Amount (₹)"})
+            .sort_values("Grant Amount (₹)", ascending=False)
+        )
+        fig = px.bar(
+            grant_by_fac, x="Faculty", y="Grant Amount (₹)",
+            text=grant_by_fac["Grant Amount (₹)"].apply(fmt_inr),
+            color_discrete_sequence=["#D97706"],
+            height=400,
+        )
+        fig.update_traces(textposition="outside")
+        fig.update_layout(xaxis_tickangle=-40, yaxis_title="Amount (₹)")
+        st.plotly_chart(fig, use_container_width=True)
+        st.divider()
 
     st.subheader("🏆 Faculty Productivity — All Members")
     p_cnt  = f_pubs["Faculty"].value_counts()    if not f_pubs.empty    else pd.Series(dtype=int)
@@ -277,14 +313,23 @@ else:
     journal_count = len(df_core[df_core[cc].astype(str).str.contains("Journal",    case=False, na=False)]) if cc else 0
     conf_count    = len(df_core[df_core[cc].astype(str).str.contains("Conference", case=False, na=False)]) if cc else 0
     patent_count  = len(tabs["patent"])
-    grant_count   = len(tabs["grant"])
 
-    m1, m2, m3, m4, m5 = st.columns(5)
+    # Compute this faculty's total grant amount
+    gr_df = tabs["grant"]
+    gr_amt_col = get_col(gr_df, ["grant amount", "amount"]) if not gr_df.empty else None
+    fac_grant_total = 0
+    if gr_amt_col and not gr_df.empty:
+        fac_grant_total = pd.to_numeric(gr_df[gr_amt_col], errors="coerce").fillna(0).sum()
+
+    grant_count   = len(gr_df)
+
+    m1, m2, m3, m4, m5, m6 = st.columns(6)
     m1.metric("📄 Total (J+C)", journal_count + conf_count)
     m2.metric("📰 Journals",    journal_count)
     m3.metric("🎤 Conferences", conf_count)
     m4.metric("🔬 Patents",     patent_count)
     m5.metric("🏦 Grants",      grant_count)
+    m6.metric("💰 Grant Amount", fmt_inr(fac_grant_total))
 
     st.divider()
 
@@ -351,8 +396,6 @@ else:
         if not df_p.empty:
             display_cols = [c for c in [yc, cc, tc, vc_col, sc, qc] if c]
             st.dataframe(df_p[display_cols].reset_index(drop=True), use_container_width=True)
-        else:
-            st.info("No publication data.")
 
     st.divider()
     s1, s2 = st.columns(2)
@@ -416,18 +459,25 @@ else:
 
     with w2:
         st.subheader("🏦 Grants / Funded Projects")
-        gr_df = tabs["grant"]
         if not gr_df.empty:
             gr_title  = get_col(gr_df, ["title"])
             gr_agency = get_col(gr_df, ["funding", "agency"])
-            gr_amount = get_col(gr_df, ["amount", "grant amount"])
             gr_year   = get_col(gr_df, ["grant year", "year"])
             for _, r in gr_df.iterrows():
-                t_val = str(r[gr_title]).strip()  if gr_title  else "—"
-                ag    = str(r[gr_agency]).strip()  if gr_agency else ""
-                amt   = str(r[gr_amount]).strip()  if gr_amount else ""
-                yr_g  = str(r[gr_year]).strip()    if gr_year   else ""
-                meta  = " · ".join(x for x in [ag, amt, yr_g] if x and x != "nan")
+                t_val = str(r[gr_title]).strip()   if gr_title   else "—"
+                ag    = str(r[gr_agency]).strip()   if gr_agency  else ""
+                amt_v = r[gr_amt_col]               if gr_amt_col else None
+                yr_g  = str(r[gr_year]).strip()     if gr_year    else ""
+                # Format amount
+                try:
+                    amt_fmt = fmt_inr(float(amt_v)) if amt_v and str(amt_v) not in ("nan", "") else ""
+                except (ValueError, TypeError):
+                    amt_fmt = str(amt_v).strip() if amt_v else ""
+                meta_parts = [x for x in [ag, amt_fmt, yr_g] if x and x != "nan"]
+                meta = " · ".join(meta_parts)
                 st.markdown(f"• **{t_val}**" + (f"  \n  _{meta}_" if meta else ""))
+            # Show total at the bottom
+            if fac_grant_total > 0:
+                st.markdown(f"---\n**Total Grant Amount: {fmt_inr(fac_grant_total)}**")
         else:
             st.info("No grants on record.")
