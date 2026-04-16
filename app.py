@@ -1,391 +1,241 @@
 import streamlit as st
 import pandas as pd
 import plotly.express as px
+import numpy as np
 
-st.set_page_config(layout="wide")
-st.title("📊 Publication Dashboard")
+st.set_page_config(layout="wide", page_title="ECE Faculty Dashboard")
 
-file = "Protected_Deparment_FactSheet-2.xlsx"
+# --- DATA EXTRACTION HELPERS ---
 
-sheets = pd.read_excel(file, sheet_name=None, header=1)
-
-# ------------------ SIDEBAR ------------------
-st.sidebar.header("Controls")
-page = st.sidebar.selectbox("Select View", ["Individual", "All"])
-
-# ------------------ HELPERS ------------------
-
-def clean_columns(df):
-    df.columns = [str(col).strip() for col in df.columns]
-    return df
-
-def get_column(df, keywords):
-    for col in df.columns:
-        for key in keywords:
-            if key.lower() in col.lower():
-                return col
+def get_col_name(df, keywords):
+    """Finds a column name based on keywords (case-insensitive)."""
+    for c in df.columns:
+        if any(k.lower() in str(c).lower() for k in keywords):
+            return c
     return None
 
-def parse_amount(val):
-    """Convert amount strings like '1,949,400' or '27,73,800' to float. Returns None if invalid."""
-    import math
-    if val is None:
-        return None
-    s = str(val).strip().replace(",", "").replace("INR", "").strip()
-    if s.lower() in ("nan", "", "-", "n/a"):
-        return None
-    try:
-        result = float(s)
-        if math.isnan(result) or math.isinf(result):
-            return None
-        return result
-    except ValueError:
-        return None
-
-# ------------------ PATENT EXTRACTOR ------------------
-
-def extract_patents(sheet_name):
-    raw = pd.read_excel(file, sheet_name=sheet_name, header=None)
-
-    header_row_idx = None
-    for i, row in raw.iterrows():
-        for cell in row.values:
-            if "patent category" in str(cell).lower():
-                header_row_idx = i
-                break
-        if header_row_idx is not None:
-            break
-
-    if header_row_idx is None:
-        return pd.DataFrame()
-
-    header_row = raw.iloc[header_row_idx]
-    valid_cols = [c for c in raw.columns if str(header_row[c]).strip() not in ("nan", "")]
-
-    patent_rows = []
-    for i in range(header_row_idx + 1, len(raw)):
-        row = raw.iloc[i]
-        if row[valid_cols].isna().all():
-            break
-        patent_rows.append(row[valid_cols].values)
-
-    if not patent_rows:
-        return pd.DataFrame()
-
-    col_names = [str(header_row[c]).strip() for c in valid_cols]
-    patent_data = pd.DataFrame(patent_rows, columns=col_names)
-
-    title_col = None
-    inventors_col = None
-    for col in patent_data.columns:
-        col_lower = col.lower().strip()
-        if col_lower == "title":
-            title_col = col
-        elif "inoveter" in col_lower or "inventor" in col_lower:
-            inventors_col = col
-
-    if title_col:
-        patent_data = patent_data[
-            patent_data[title_col].astype(str).str.strip().str.lower().ne("nan") &
-            patent_data[title_col].astype(str).str.strip().ne("")
+def clean_dataframe(df):
+    """Removes empty rows and standardizes column names to strings."""
+    if df.empty: return df
+    df = df.dropna(how='all').reset_index(drop=True)
+    df.columns = [str(c).strip() for c in df.columns]
+    # Deduplicate column names to prevent Concat errors
+    cols = pd.Series(df.columns)
+    for dup in cols[cols.duplicated()].unique(): 
+        cols[cols[cols == dup].index] = [
+            f"{dup}_{i}" if i != 0 else dup for i in range(len(cols[cols == dup]))
         ]
+    df.columns = cols
+    return df
 
-    patent_data["_title_col"] = title_col
-    patent_data["_inventors_col"] = inventors_col
-    return patent_data
+@st.cache_data
+def load_and_parse_data(file_path):
+    all_sheets = pd.read_excel(file_path, sheet_name=None, header=None)
+    parsed_data = {}
+    excluded = ['Sheet1', 'Sheet 1', 'Sheet2', 'Master', 'Summary']
+    
+    for name, df in all_sheets.items():
+        if name in excluded or "Sheet" in name: continue
+        
+        df_str = df.astype(str)
+        def find_row(keyword):
+            mask = df_str.apply(lambda x: x.str.contains(keyword, case=False, na=False)).any(axis=1)
+            return int(df[mask].index[0]) if mask.any() else None
 
-# ------------------ GRANT EXTRACTOR ------------------
+        sections = {
+            "pub": find_row("Publication Details"),
+            "patent": find_row("Patent/Copyright Detail"),
+            "grant": find_row("Project"),
+            "workshop": find_row("Workshop/Seminar/Conference Organised"),
+            "stud_ach": find_row("Student Acheivements"),
+            "award": find_row("Award Recived")
+        }
+        
+        indices = sorted([idx for idx in sections.values() if idx is not None])
+        indices.append(len(df))
 
-def extract_grants(sheet_name):
-    """
-    Extracts government grants (Grant Amount) and industry consultancy
-    (Consultancy Amount) from a faculty sheet.
-    Returns a list of dicts: Year, Agency, Amount, Title, Type.
-    """
-    raw = pd.read_excel(file, sheet_name=sheet_name, header=None)
-    results = []
+        def extract_table(key):
+            start = sections[key]
+            if start is None: return pd.DataFrame()
+            end = next((i for i in indices if i > start), len(df))
+            
+            sub = df.iloc[start+1 : end].reset_index(drop=True)
+            # Find the actual header row (usually the first row with text)
+            header_idx = 0
+            for i in range(len(sub)):
+                if sub.iloc[i].dropna().shape[0] > 1:
+                    header_idx = i
+                    break
+            
+            sub.columns = sub.iloc[header_idx]
+            sub = sub[header_idx + 1:].dropna(how='all')
+            return clean_dataframe(sub)
 
-    grant_header_idx = None
-    consult_header_idx = None
+        parsed_data[name] = {k: extract_table(k) for k in sections.keys()}
+    
+    return parsed_data
 
-    for i, row in raw.iterrows():
-        for cell in row.values:
-            cell_s = str(cell).lower()
-            if "grant amount" in cell_s and grant_header_idx is None:
-                grant_header_idx = i
-            if "consultancy amount" in cell_s and consult_header_idx is None:
-                consult_header_idx = i
+# --- LOAD DATA ---
+try:
+    data_dict = load_and_parse_data("Protected_Deparment_FactSheet-2.xlsx")
+except Exception as e:
+    st.error(f"Error reading file: {e}")
+    st.stop()
 
-    def parse_block(header_idx, amount_keyword, type_label, year_keyword, agency_keyword):
-        if header_idx is None:
-            return
-        header_row = raw.iloc[header_idx]
+# --- PRE-PROCESS DATA ---
+all_fac_list = sorted(list(data_dict.keys()))
+all_pubs_l, all_pats_l, all_grants_l = [], [], []
 
-        col_map = {}
-        for c in raw.columns:
-            val = str(header_row[c]).strip().lower()
-            if val not in ("nan", ""):
-                col_map[c] = val
+for fac, tables in data_dict.items():
+    p, pt, g = tables['pub'].copy(), tables['patent'].copy(), tables['grant'].copy()
+    if not p.empty: p['Faculty'] = fac; all_pubs_l.append(p)
+    if not pt.empty: pt['Faculty'] = fac; all_pats_l.append(pt)
+    if not g.empty: g['Faculty'] = fac; all_grants_l.append(g)
 
-        year_col = amount_col = agency_col = title_col = None
-        for c, name in col_map.items():
-            if year_keyword in name and year_col is None:
-                year_col = c
-            if amount_keyword in name and amount_col is None:
-                amount_col = c
-            if agency_keyword in name and agency_col is None:
-                agency_col = c
-            if "title" in name and title_col is None:
-                title_col = c
+df_all_p = pd.concat(all_pubs_l, ignore_index=True) if all_pubs_l else pd.DataFrame()
+df_all_pt = pd.concat(all_pats_l, ignore_index=True) if all_pats_l else pd.DataFrame()
+df_all_g = pd.concat(all_grants_l, ignore_index=True) if all_grants_l else pd.DataFrame()
 
-        valid = list(col_map.keys())
-        for i in range(header_idx + 1, len(raw)):
-            row = raw.iloc[i]
-            if row[valid].isna().all():
-                break
-            amt_raw = row[amount_col] if amount_col is not None else None
-            amount = parse_amount(amt_raw)
-            if amount is None:
-                continue
-            year_val = row[year_col] if year_col is not None else None
-            year = None
-            try:
-                year = int(float(str(year_val)))
-            except (ValueError, TypeError):
-                pass
-            agency = str(row[agency_col]).strip() if agency_col is not None else "N/A"
-            title  = str(row[title_col]).strip()  if title_col  is not None else "N/A"
-            results.append({
-                "Year":   year,
-                "Agency": agency,
-                "Amount": amount,
-                "Title":  title,
-                "Type":   type_label,
-            })
+# Global Filtering (2022+ and core categories)
+y_col_p = get_col_name(df_all_p, ['year'])
+cat_col_p = get_col_name(df_all_p, ['category'])
 
-    parse_block(grant_header_idx,   "grant amount",       "Government Grant",
-                "grant year",              "funding agency")
-    parse_block(consult_header_idx, "consultancy amount", "Industry Consultancy",
-                "consultancy grant year",  "funding industry")
-
-    return results
-
-# ------------------ BUILD ALL-FACULTY GRANT TABLE ------------------
-
-all_grants = []
-for name in sheets.keys():
-    for g in extract_grants(name):
-        g["Faculty"] = name
-        all_grants.append(g)
-
-df_grants_all = pd.DataFrame(all_grants) if all_grants else pd.DataFrame(
-    columns=["Year", "Agency", "Amount", "Title", "Type", "Faculty"])
-
-# ------------------ ALL DATA (publications) ------------------
-
-all_data = []
-for name, df_temp in sheets.items():
-    df_temp = df_temp.dropna(how="all")
-    df_temp = clean_columns(df_temp)
-    df_temp["Faculty"] = name
-
-    year_col  = get_column(df_temp, ["year"])
-    cat_col   = get_column(df_temp, ["category"])
-    title_col = get_column(df_temp, ["title"])
-
-    df_temp["Publication Year"]     = pd.to_numeric(df_temp[year_col], errors="coerce") if year_col else None
-    df_temp["Publication Category"] = df_temp[cat_col]  if cat_col  else None
-    df_temp["Publication Title"]    = df_temp[title_col] if title_col else "N/A"
-    all_data.append(df_temp)
-
-df_all = pd.concat(all_data, ignore_index=True)
-df_all["Count"] = 1
-
-# ================================================================
-# ALL PAGE
-# ================================================================
-
-if page == "All":
-
-    st.header("📊 Department Overview")
-
-    total_grant = df_grants_all["Amount"].sum() if not df_grants_all.empty else 0
-    col1, col2, col3 = st.columns(3)
-    col1.metric("Total Records",        len(df_all))
-    col2.metric("Total Faculty",        df_all["Faculty"].nunique())
-    col3.metric("Total Grants Received", f"Rs.{total_grant:,.0f}")
-
-    st.subheader("📈 Publication Trend")
-    df_trend = df_all.dropna(subset=["Publication Year"]).copy()
-    df_trend = df_trend[df_trend["Publication Year"] >= 2022]
-    if not df_trend.empty:
-        df_trend["Publication Year"] = df_trend["Publication Year"].astype(int)
-        df_trend = df_trend.groupby("Publication Year")["Count"].sum().reset_index()
-        fig = px.line(df_trend, x="Publication Year", y="Count", markers=True)
-        st.plotly_chart(fig, use_container_width=True)
-    else:
-        st.write("No valid data from 2022 onwards")
-
-    st.subheader("📊 Journal vs Conference")
-    df_cat = df_all[
-        df_all["Publication Category"].astype(str)
-        .str.contains("Journal|Conference", case=False, na=False)
-    ]
-    if not df_cat.empty:
-        df_cat = df_cat.groupby("Publication Category")["Count"].sum().reset_index()
-        fig2 = px.pie(df_cat, names="Publication Category", values="Count")
-        st.plotly_chart(fig2, use_container_width=True)
-
-    st.subheader("🏆 Faculty Productivity")
-    df_fac = df_all.groupby("Faculty")["Count"].sum().reset_index()
-    df_fac = df_fac.sort_values(by="Count", ascending=False)
-    fig3 = px.bar(df_fac, x="Faculty", y="Count")
-    st.plotly_chart(fig3, use_container_width=True)
-
-    # ---------- TOTAL GRANT PER YEAR ----------
-    st.subheader("💰 Total Grant Amount per Year")
-
-    if df_grants_all.empty or df_grants_all["Year"].isna().all():
-        st.write("No grant data available.")
-    else:
-        df_gy = df_grants_all.dropna(subset=["Year"]).copy()
-        df_gy["Year"] = df_gy["Year"].astype(int)
-
-        df_gy_grouped = (
-            df_gy.groupby(["Year", "Type"])["Amount"]
-            .sum()
-            .reset_index()
-        )
-
-        fig_grant = px.bar(
-            df_gy_grouped,
-            x="Year",
-            y="Amount",
-            color="Type",
-            barmode="group",
-            labels={"Amount": "Grant Amount (Rs.)", "Year": "Year"},
-            color_discrete_map={
-                "Government Grant":     "#4C78A8",
-                "Industry Consultancy": "#F58518",
-            },
-        )
-        fig_grant.update_layout(yaxis_tickformat=",")
-        st.plotly_chart(fig_grant, use_container_width=True)
-
-        # Summary table
-        df_gy_total = (
-            df_gy.groupby("Year")["Amount"]
-            .sum()
-            .reset_index()
-            .sort_values("Year")
-        )
-        df_gy_total.columns = ["Year", "Total Amount"]
-        df_gy_total["Total Amount"] = df_gy_total["Total Amount"].apply(lambda x: f"Rs.{x:,.0f}")
-        st.dataframe(df_gy_total, use_container_width=True, hide_index=True)
-
-# ================================================================
-# INDIVIDUAL PAGE
-# ================================================================
-
+if y_col_p and not df_all_p.empty:
+    df_all_p[y_col_p] = pd.to_numeric(df_all_p[y_col_p], errors='coerce')
+    f_pubs = df_all_p[(df_all_p[y_col_p] >= 2022)].copy()
+    if cat_col_p:
+        f_pubs = f_pubs[f_pubs[cat_col_p].astype(str).str.contains("Journal|Conference", case=False, na=False)]
 else:
+    f_pubs = pd.DataFrame()
 
-    sheet_name = st.sidebar.selectbox("Select Faculty", list(sheets.keys()))
-    df = sheets[sheet_name]
-    df = df.dropna(how="all")
-    df = clean_columns(df)
+y_col_pt = get_col_name(df_all_pt, ['year'])
+if y_col_pt and not df_all_pt.empty:
+    df_all_pt[y_col_pt] = pd.to_numeric(df_all_pt[y_col_pt], errors='coerce')
+    f_pats = df_all_pt[df_all_pt[y_col_pt] >= 2022].copy()
+else:
+    f_pats = pd.DataFrame()
 
-    title_col      = None
-    patent_cat_col = None
-    year_col       = None
-    cat_col        = None
-    status_col     = None
-    quartile_col   = None
+# --- SIDEBAR ---
+view = st.sidebar.radio("Navigation", ["Overall Dashboard", "Individual Profile"])
 
-    for col in df.columns:
-        col_lower = col.lower().strip()
-        if col_lower in ["title", "publication title"]:
-            title_col = col
-        elif "patent category" in col_lower:
-            patent_cat_col = col
-        elif "year" in col_lower:
-            year_col = col
-        elif "category" in col_lower:
-            cat_col = col
-        elif "status" in col_lower:
-            status_col = col
-        elif "quartile" in col_lower:
-            quartile_col = col
+# --- OVERALL DASHBOARD ---
+if view == "Overall Dashboard":
+    st.title("📊 Department Dashboard (2022 - Present)")
+    
+    k1, k2, k3 = st.columns(3)
+    k1.metric("Total Records (J+C+P)", len(f_pubs) + len(f_pats))
+    k2.metric("Total Faculties", len(all_fac_list))
+    k3.metric("Total Grants/Funding", len(df_all_g))
 
-    df["Publication Year"]     = pd.to_numeric(df[year_col], errors="coerce") if year_col else None
-    df["Publication Category"] = df[cat_col]  if cat_col  else None
-    df["Publication Title"]    = df[title_col] if title_col else "N/A"
-    df["Status"]               = df[status_col]   if status_col   else "Unknown"
-    df["Quartile"]             = df[quartile_col] if quartile_col else "Unknown"
+    st.divider()
 
-    df = df[df["Publication Year"].notna()]
-    df["Publication Year"] = df["Publication Year"].astype(int)
-    df["Count"] = 1
+    # Trend and Category Pie
+    c_trend, c_pie = st.columns(2)
+    with c_trend:
+        st.subheader("📈 Publication Trend")
+        if not f_pubs.empty:
+            trend = f_pubs.groupby(y_col_p).size().reset_index(name='Count')
+            st.plotly_chart(px.line(trend, x=y_col_p, y='Count', markers=True), use_container_width=True)
+    with c_pie:
+        st.subheader("📊 Journal vs Conference")
+        if not f_pubs.empty:
+            pie_df = f_pubs[cat_col_p].astype(str).str.capitalize().value_counts().reset_index()
+            pie_df.columns = ['Type', 'Count']
+            st.plotly_chart(px.pie(pie_df, names='Type', values='Count', hole=0.4), use_container_width=True)
 
-    # KPIs
-    grants_this     = extract_grants(sheet_name)
-    total_ind_grant = sum(g["Amount"] for g in grants_this)
+    # Faculty Productivity
+    st.subheader("🏆 Faculty Productivity (All 28 Members)")
+    p_cnt = f_pubs['Faculty'].value_counts()
+    pt_cnt = f_pats['Faculty'].value_counts()
+    prod = pd.DataFrame({'Papers': p_cnt, 'Patents': pt_cnt}).fillna(0)
+    prod['Total'] = prod['Papers'] + prod['Patents']
+    prod = prod.reindex(all_fac_list, fill_value=0).sort_values('Total', ascending=False).reset_index().rename(columns={'index':'Faculty'})
+    
+    st.plotly_chart(px.bar(prod, x='Faculty', y=['Papers', 'Patents'], barmode='stack', height=500), use_container_width=True)
 
-    col1, col2, col3 = st.columns(3)
-    col1.metric("Total Publications",   len(df))
-    col2.metric("Published Papers",     len(df[df["Status"] == "Published"]))
-    col3.metric("Total Grant Received", f"Rs.{total_ind_grant:,.0f}")
+    # Heatmap
+    st.subheader("🔥 Faculty Publication Heatmap")
+    if not f_pubs.empty:
+        heat = f_pubs.groupby(['Faculty', y_col_p]).size().unstack(fill_value=0)
+        heat = heat.reindex(all_fac_list, fill_value=0)
+        st.plotly_chart(px.imshow(heat, text_auto=True, aspect="auto", color_continuous_scale="RdBu_r"), use_container_width=True)
 
-    # Charts
-    col1, col2 = st.columns(2)
-    with col1:
-        st.subheader("📈 Publications per Year")
-        df_year = df.groupby("Publication Year")["Count"].sum().reset_index()
-        fig1 = px.bar(df_year, x="Publication Year", y="Count")
-        st.plotly_chart(fig1, use_container_width=True)
+# --- INDIVIDUAL PROFILE ---
+else:
+    fac = st.sidebar.selectbox("Select Faculty", all_fac_list)
+    tabs = data_dict[fac]
+    df_p = tabs['pub']
+    
+    st.title(f"👤 Faculty Profile: {fac}")
 
-    with col2:
-        st.subheader("📊 Category Distribution")
-        df_cat_chart = df.groupby("Publication Category")["Count"].sum().reset_index()
-        fig2 = px.pie(df_cat_chart, names="Publication Category", values="Count")
-        st.plotly_chart(fig2, use_container_width=True)
+    if not df_p.empty:
+        # Dynamic Column Discovery
+        yc = get_col_name(df_p, ['year'])
+        cc = get_col_name(df_p, ['category'])
+        sc = get_col_name(df_p, ['status'])
+        qc = get_col_name(df_p, ['quartile'])
+        tc = get_col_name(df_p, ['title'])
 
-    # ------------------ PATENTS ------------------
-    st.subheader("📜 Patents")
-    patents_df = extract_patents(sheet_name)
-    if patents_df.empty:
-        st.write("No patents found for this faculty member.")
-    else:
-        title_col_pat     = patents_df["_title_col"].iloc[0]
-        inventors_col_pat = patents_df["_inventors_col"].iloc[0]
-        for _, row in patents_df.iterrows():
-            title     = str(row[title_col_pat]).strip()     if title_col_pat     else "N/A"
-            inventors = str(row[inventors_col_pat]).strip() if inventors_col_pat and inventors_col_pat in row.index else "N/A"
-            category  = str(row.get("Patent Category", "N/A")).strip()
-            year      = str(row.get("Year", "N/A")).strip()
-            st.write(f"• **{title}**  |  Category: {category}  |  Year: {year}  |  Inventors: {inventors}")
+        df_p[yc] = pd.to_numeric(df_p[yc], errors='coerce')
+        # Only show core categories in charts
+        mask = df_p[cc].astype(str).str.contains("Journal|Conference", case=False, na=False)
+        df_clean = df_p[mask].copy()
 
-    # ------------------ GRANTS ------------------
-    st.subheader("💰 Grants & Consultancy")
+        col1, col2 = st.columns(2)
+        with col1:
+            st.subheader("📈 Publications per Year")
+            y_data = df_clean.groupby(yc).size().reset_index(name='Count')
+            st.plotly_chart(px.bar(y_data, x=yc, y='Count'), use_container_width=True)
+            
+        with col2:
+            st.subheader("📊 Category Distribution")
+            p_c = len(df_clean[df_clean[cc].astype(str).str.contains("Journal", case=False, na=False)])
+            c_c = len(df_clean[df_clean[cc].astype(str).str.contains("Conference", case=False, na=False)])
+            pat_c = len(tabs['patent'])
+            pie_v = pd.DataFrame({'Cat':['Journal','Conference','Patent'], 'Val':[p_c, c_c, pat_c]})
+            st.plotly_chart(px.pie(pie_v, names='Cat', values='Val', hole=0.4), use_container_width=True)
 
-    if not grants_this:
-        st.write("No grant or consultancy data found for this faculty member.")
-    else:
-        df_ind = pd.DataFrame(grants_this)
-        gov    = df_ind[df_ind["Type"] == "Government Grant"]
-        cons   = df_ind[df_ind["Type"] == "Industry Consultancy"]
+        col3, col4 = st.columns(2)
+        with col3:
+            st.subheader("📌 Status Analysis")
+            if sc:
+                # Clean Status: Filter out "None", empty strings, or numbers
+                s_df = df_clean.copy()
+                s_df[sc] = s_df[sc].astype(str).str.strip().str.capitalize()
+                s_df = s_df[s_df[sc].str.contains("Published|Accepted|Submi", case=False, na=False)]
+                if not s_df.empty:
+                    st.plotly_chart(px.bar(s_df[sc].value_counts().reset_index(), x='index', y=sc, labels={'index':'Status'}), use_container_width=True)
+                else: st.info("No status data (Accepted/Published/Submitted) found.")
+            else: st.warning("Status column not detected.")
 
-        if not gov.empty:
-            st.markdown("**🏛️ Government / Research Grants**")
-            for _, row in gov.iterrows():
-                year   = int(row["Year"]) if row["Year"] is not None else "N/A"
-                amount = f"Rs.{row['Amount']:,.0f}"
-                st.write(f"• **{row['Title']}**")
-                st.write(f"  &nbsp;&nbsp;&nbsp;Agency: {row['Agency']}  |  Year: {year}  |  Amount: **{amount}**")
+        with col4:
+            st.subheader("🏆 Quartile Analysis")
+            if qc:
+                # Clean Quartile: Only show Q1-Q4
+                q_df = df_clean.copy()
+                q_df[qc] = q_df[qc].astype(str).str.strip().str.upper()
+                q_order = ['Q1', 'Q2', 'Q3', 'Q4']
+                q_counts = q_df[qc].value_counts()
+                q_final = pd.DataFrame({'Quartile': q_order, 'Count': [q_counts.get(q, 0) for q in q_order]})
+                st.plotly_chart(px.bar(q_final, x='Quartile', y='Count', color='Quartile'), use_container_width=True)
+            else: st.warning("Quartile column not detected.")
 
-        if not cons.empty:
-            st.markdown("**🏭 Industry Consultancy**")
-            for _, row in cons.iterrows():
-                year   = int(row["Year"]) if row["Year"] is not None else "N/A"
-                amount = f"Rs.{row['Amount']:,.0f}"
-                st.write(f"• **{row['Title']}**")
-                st.write(f"  &nbsp;&nbsp;&nbsp;Industry: {row['Agency']}  |  Year: {year}  |  Amount: **{amount}**")
+    st.divider()
+    s1, s2 = st.columns(2)
+    with s1:
+        st.subheader("🎖️ Achievements / Awards")
+        for _, r in tabs['award'].iterrows(): st.markdown(f"• {next((v for v in r if len(str(v))>5), 'Award')}")
+        for _, r in tabs['stud_ach'].iterrows(): st.markdown(f"• (Student) {next((v for v in r if len(str(v))>5), 'Achievement')}")
+    with s2:
+        st.subheader("📜 Patents")
+        pt_df = tabs['patent']
+        if not pt_df.empty:
+            pt_tit = get_col_name(pt_df, ['title'])
+            pt_typ = get_col_name(pt_df, ['category', 'type'])
+            for _, r in pt_df.iterrows(): st.markdown(f"**{r[pt_tit]}** \n*Type: {r[pt_typ]}*")
+    
+    st.subheader("🏫 Workshops / Seminars")
+    ws_df = tabs['workshop']
+    if not ws_df.empty:
+        ws_t = get_col_name(ws_df, ['title'])
+        for _, r in ws_df.iterrows(): st.markdown(f"• {r[ws_t]}")
