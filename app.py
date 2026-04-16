@@ -1,241 +1,433 @@
 import streamlit as st
 import pandas as pd
 import plotly.express as px
-import numpy as np
 
-st.set_page_config(layout="wide", page_title="ECE Faculty Dashboard")
+st.set_page_config(layout="wide", page_title="ECE Faculty Dashboard", page_icon="📡")
 
-# --- DATA EXTRACTION HELPERS ---
+# ──────────────────────────────────────────────
+#  UTILITIES
+# ──────────────────────────────────────────────
 
-def get_col_name(df, keywords):
-    """Finds a column name based on keywords (case-insensitive)."""
+def find_row(df_str, keyword):
+    mask = df_str.apply(
+        lambda col: col.str.contains(keyword, case=False, na=False)
+    ).any(axis=1)
+    hits = df_str[mask].index
+    return int(hits[0]) if len(hits) > 0 else None
+
+
+def dedup_cols(cols):
+    seen, result = {}, []
+    for c in cols:
+        c = str(c).strip()
+        if c in seen:
+            seen[c] += 1
+            result.append(f"{c}_{seen[c]}")
+        else:
+            seen[c] = 0
+            result.append(c)
+    return result
+
+
+def extract_section(df, start_kw, end_kw):
+    """
+    Extract a table section from a faculty sheet.
+    Finds the section header row by start_kw, then the first row with >=3
+    non-null values as the column header, reads until end_kw.
+    Returns a clean DataFrame. Only keeps rows whose first col is an integer.
+    """
+    df_str = df.astype(str)
+    start = find_row(df_str, start_kw)
+    end   = find_row(df_str, end_kw) if end_kw else len(df)
+    if start is None:
+        return pd.DataFrame()
+
+    header_row = None
+    for offset in range(1, 6):
+        if start + offset >= len(df):
+            break
+        vals = [v for v in df.iloc[start + offset].tolist() if str(v) not in ("nan", "")]
+        if len(vals) >= 3:
+            header_row = start + offset
+            break
+    if header_row is None:
+        return pd.DataFrame()
+
+    data_end = end if end else len(df)
+    sub = df.iloc[header_row + 1 : data_end].copy()
+    sub.columns = dedup_cols(df.iloc[header_row].tolist())
+    sub = sub.dropna(how="all")
+    first_col = sub.columns[0]
+    sub = sub[sub[first_col].astype(str).str.strip().str.match(r"^\d+$")]
+    return sub.reset_index(drop=True)
+
+
+def get_col(df, keywords):
     for c in df.columns:
-        if any(k.lower() in str(c).lower() for k in keywords):
+        if any(k.lower() in c.lower() for k in keywords):
             return c
     return None
 
-def clean_dataframe(df):
-    """Removes empty rows and standardizes column names to strings."""
-    if df.empty: return df
-    df = df.dropna(how='all').reset_index(drop=True)
-    df.columns = [str(c).strip() for c in df.columns]
-    # Deduplicate column names to prevent Concat errors
-    cols = pd.Series(df.columns)
-    for dup in cols[cols.duplicated()].unique(): 
-        cols[cols[cols == dup].index] = [
-            f"{dup}_{i}" if i != 0 else dup for i in range(len(cols[cols == dup]))
-        ]
-    df.columns = cols
-    return df
+
+def safe_vc(series, label="Label"):
+    vc = series.value_counts().reset_index()
+    vc.columns = [label, "Count"]
+    return vc
+
+
+# ──────────────────────────────────────────────
+#  DATA LOADING
+# ──────────────────────────────────────────────
 
 @st.cache_data
-def load_and_parse_data(file_path):
-    all_sheets = pd.read_excel(file_path, sheet_name=None, header=None)
-    parsed_data = {}
-    excluded = ['Sheet1', 'Sheet 1', 'Sheet2', 'Master', 'Summary']
-    
-    for name, df in all_sheets.items():
-        if name in excluded or "Sheet" in name: continue
-        
-        df_str = df.astype(str)
-        def find_row(keyword):
-            mask = df_str.apply(lambda x: x.str.contains(keyword, case=False, na=False)).any(axis=1)
-            return int(df[mask].index[0]) if mask.any() else None
-
-        sections = {
-            "pub": find_row("Publication Details"),
-            "patent": find_row("Patent/Copyright Detail"),
-            "grant": find_row("Project"),
-            "workshop": find_row("Workshop/Seminar/Conference Organised"),
-            "stud_ach": find_row("Student Acheivements"),
-            "award": find_row("Award Recived")
+def load_data(path):
+    raw = pd.read_excel(path, sheet_name=None, header=None)
+    excluded = {"Sheet1"}
+    data = {}
+    for name, df in raw.items():
+        if name in excluded:
+            continue
+        data[name] = {
+            "pub":     extract_section(df, "Publication Details",                    "Patent/Copyright Detail"),
+            "patent":  extract_section(df, "Patent/Copyright Detail",                "Project"),
+            "grant":   extract_section(df, "Project",                                "Industry Consultancy"),
+            "consult": extract_section(df, "Industry Consultancy",                   "Workshop/Seminar/Conference Organised"),
+            "workshop":extract_section(df, "Workshop/Seminar/Conference Organised",  "Student Acheivements"),
+            "stud_ach":extract_section(df, "Student Acheivements",                   "Expert/Invited Talk"),
+            "award":   extract_section(df, "Award Recived",                          "Membership"),
         }
-        
-        indices = sorted([idx for idx in sections.values() if idx is not None])
-        indices.append(len(df))
+    return data
 
-        def extract_table(key):
-            start = sections[key]
-            if start is None: return pd.DataFrame()
-            end = next((i for i in indices if i > start), len(df))
-            
-            sub = df.iloc[start+1 : end].reset_index(drop=True)
-            # Find the actual header row (usually the first row with text)
-            header_idx = 0
-            for i in range(len(sub)):
-                if sub.iloc[i].dropna().shape[0] > 1:
-                    header_idx = i
-                    break
-            
-            sub.columns = sub.iloc[header_idx]
-            sub = sub[header_idx + 1:].dropna(how='all')
-            return clean_dataframe(sub)
 
-        parsed_data[name] = {k: extract_table(k) for k in sections.keys()}
-    
-    return parsed_data
-
-# --- LOAD DATA ---
+FILE = "Protected_Deparment_FactSheet-2.xlsx"
 try:
-    data_dict = load_and_parse_data("Protected_Deparment_FactSheet-2.xlsx")
+    data_dict = load_data(FILE)
+except FileNotFoundError:
+    st.error(f"❌ **{FILE}** not found. Place it in the same folder as this script.")
+    st.stop()
 except Exception as e:
-    st.error(f"Error reading file: {e}")
+    st.error(f"❌ Error reading file: {e}")
     st.stop()
 
-# --- PRE-PROCESS DATA ---
-all_fac_list = sorted(list(data_dict.keys()))
-all_pubs_l, all_pats_l, all_grants_l = [], [], []
+# ──────────────────────────────────────────────
+#  GLOBAL DATAFRAMES
+# ──────────────────────────────────────────────
 
+all_fac = sorted(data_dict.keys())
+
+pub_list, pat_list, grant_list = [], [], []
 for fac, tables in data_dict.items():
-    p, pt, g = tables['pub'].copy(), tables['patent'].copy(), tables['grant'].copy()
-    if not p.empty: p['Faculty'] = fac; all_pubs_l.append(p)
-    if not pt.empty: pt['Faculty'] = fac; all_pats_l.append(pt)
-    if not g.empty: g['Faculty'] = fac; all_grants_l.append(g)
+    for lst, key in [(pub_list, "pub"), (pat_list, "patent"), (grant_list, "grant")]:
+        t = tables[key].copy()
+        if not t.empty:
+            t["Faculty"] = fac
+            lst.append(t)
 
-df_all_p = pd.concat(all_pubs_l, ignore_index=True) if all_pubs_l else pd.DataFrame()
-df_all_pt = pd.concat(all_pats_l, ignore_index=True) if all_pats_l else pd.DataFrame()
-df_all_g = pd.concat(all_grants_l, ignore_index=True) if all_grants_l else pd.DataFrame()
+df_pubs   = pd.concat(pub_list,   ignore_index=True) if pub_list   else pd.DataFrame()
+df_pats   = pd.concat(pat_list,   ignore_index=True) if pat_list   else pd.DataFrame()
+df_grants = pd.concat(grant_list, ignore_index=True) if grant_list else pd.DataFrame()
 
-# Global Filtering (2022+ and core categories)
-y_col_p = get_col_name(df_all_p, ['year'])
-cat_col_p = get_col_name(df_all_p, ['category'])
+YEAR_COL  = get_col(df_pubs, ["publication year", "year"])
+CAT_COL   = get_col(df_pubs, ["publication category", "category"])
+STAT_COL  = get_col(df_pubs, ["status"])
+QCOL      = get_col(df_pubs, ["quartile"])
+TITLE_COL = get_col(df_pubs, ["publication title", "title"])
 
-if y_col_p and not df_all_p.empty:
-    df_all_p[y_col_p] = pd.to_numeric(df_all_p[y_col_p], errors='coerce')
-    f_pubs = df_all_p[(df_all_p[y_col_p] >= 2022)].copy()
-    if cat_col_p:
-        f_pubs = f_pubs[f_pubs[cat_col_p].astype(str).str.contains("Journal|Conference", case=False, na=False)]
+if YEAR_COL and not df_pubs.empty:
+    df_pubs[YEAR_COL] = pd.to_numeric(df_pubs[YEAR_COL], errors="coerce")
+
+if YEAR_COL and CAT_COL and not df_pubs.empty:
+    f_pubs = df_pubs[
+        (df_pubs[YEAR_COL] >= 2022) &
+        df_pubs[CAT_COL].astype(str).str.contains("Journal|Conference", case=False, na=False)
+    ].copy()
 else:
     f_pubs = pd.DataFrame()
 
-y_col_pt = get_col_name(df_all_pt, ['year'])
-if y_col_pt and not df_all_pt.empty:
-    df_all_pt[y_col_pt] = pd.to_numeric(df_all_pt[y_col_pt], errors='coerce')
-    f_pats = df_all_pt[df_all_pt[y_col_pt] >= 2022].copy()
+PAT_YEAR = get_col(df_pats, ["year"])
+if PAT_YEAR and not df_pats.empty:
+    df_pats[PAT_YEAR] = pd.to_numeric(df_pats[PAT_YEAR], errors="coerce")
+    f_pats = df_pats[df_pats[PAT_YEAR] >= 2022].copy()
 else:
-    f_pats = pd.DataFrame()
+    f_pats = df_pats.copy()
 
-# --- SIDEBAR ---
-view = st.sidebar.radio("Navigation", ["Overall Dashboard", "Individual Profile"])
+# ──────────────────────────────────────────────
+#  SIDEBAR
+# ──────────────────────────────────────────────
 
-# --- OVERALL DASHBOARD ---
-if view == "Overall Dashboard":
-    st.title("📊 Department Dashboard (2022 - Present)")
-    
-    k1, k2, k3 = st.columns(3)
-    k1.metric("Total Records (J+C+P)", len(f_pubs) + len(f_pats))
-    k2.metric("Total Faculties", len(all_fac_list))
-    k3.metric("Total Grants/Funding", len(df_all_g))
+st.sidebar.title("📡 ECE Department\nPDEU")
+view = st.sidebar.radio("🗂️ Navigate", ["📊 Overall Dashboard", "👤 Individual Profile"])
+
+# ──────────────────────────────────────────────
+#  OVERALL DASHBOARD
+# ──────────────────────────────────────────────
+
+if view == "📊 Overall Dashboard":
+    st.title("📊 ECE Department — Faculty Dashboard (2022 – Present)")
+    st.caption("Journals & Conferences only (unless stated) · Source: Protected_Deparment_FactSheet-2.xlsx")
+
+    # KPIs
+    k1, k2, k3, k4 = st.columns(4)
+    k1.metric("📄 Publications (J+C, 2022+)", len(f_pubs))
+    k2.metric("🔬 Patents (2022+)",            len(f_pats))
+    k3.metric("🏦 Grants / Projects",          len(df_grants))
+    k4.metric("👩‍🏫 Faculty Members",            len(all_fac))
 
     st.divider()
 
-    # Trend and Category Pie
-    c_trend, c_pie = st.columns(2)
-    with c_trend:
-        st.subheader("📈 Publication Trend")
+    c1, c2 = st.columns(2)
+
+    with c1:
+        st.subheader("📈 Publication Trend by Year")
+        if not f_pubs.empty and YEAR_COL:
+            trend = f_pubs.groupby(YEAR_COL).size().reset_index(name="Count")
+            fig = px.line(trend, x=YEAR_COL, y="Count", markers=True,
+                          color_discrete_sequence=["#2563EB"])
+            fig.update_layout(xaxis_title="Year", yaxis_title="Publications")
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.info("No trend data.")
+
+    with c2:
+        st.subheader("📊 Journal vs Conference Split")
+        if not f_pubs.empty and CAT_COL:
+            pie_df = safe_vc(f_pubs[CAT_COL].astype(str).str.strip().str.title(), label="Type")
+            fig = px.pie(pie_df, names="Type", values="Count", hole=0.45,
+                         color_discrete_sequence=px.colors.qualitative.Set2)
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.info("No category data.")
+
+    st.divider()
+
+    st.subheader("🏆 Faculty Productivity — All Members")
+    p_cnt  = f_pubs["Faculty"].value_counts()    if not f_pubs.empty    else pd.Series(dtype=int)
+    pt_cnt = f_pats["Faculty"].value_counts()    if not f_pats.empty    else pd.Series(dtype=int)
+    g_cnt  = df_grants["Faculty"].value_counts() if not df_grants.empty else pd.Series(dtype=int)
+
+    prod = pd.DataFrame({"Papers": p_cnt, "Patents": pt_cnt, "Grants": g_cnt}).fillna(0).astype(int)
+    prod["Total"] = prod["Papers"] + prod["Patents"] + prod["Grants"]
+    prod = (prod.reindex(all_fac, fill_value=0)
+                .sort_values("Total", ascending=False)
+                .reset_index()
+                .rename(columns={"index": "Faculty"}))
+
+    fig = px.bar(prod, x="Faculty", y=["Papers", "Patents", "Grants"],
+                 barmode="stack", height=480,
+                 color_discrete_map={"Papers": "#2563EB", "Patents": "#16A34A", "Grants": "#D97706"})
+    fig.update_layout(xaxis_tickangle=-40, legend_title_text="")
+    st.plotly_chart(fig, use_container_width=True)
+
+    st.divider()
+
+    st.subheader("🔥 Faculty × Year Publication Heatmap")
+    if not f_pubs.empty and YEAR_COL:
+        heat = f_pubs.groupby(["Faculty", YEAR_COL]).size().unstack(fill_value=0)
+        heat = heat.reindex(all_fac, fill_value=0)[sorted(heat.columns)]
+        fig = px.imshow(heat, text_auto=True, aspect="auto",
+                        color_continuous_scale="Blues",
+                        labels={"x": "Year", "y": "Faculty", "color": "Papers"})
+        fig.update_layout(height=620)
+        st.plotly_chart(fig, use_container_width=True)
+
+    st.divider()
+
+    st.subheader("🥇 Quartile Distribution (Journals, 2022+)")
+    if not f_pubs.empty and QCOL and CAT_COL:
+        q_df = f_pubs[f_pubs[CAT_COL].astype(str).str.contains("Journal", case=False, na=False)].copy()
+        q_df[QCOL] = q_df[QCOL].astype(str).str.strip().str.upper()
+        q_order  = ["Q1", "Q2", "Q3", "Q4"]
+        q_counts = q_df[QCOL].value_counts()
+        q_final  = pd.DataFrame({"Quartile": q_order,
+                                  "Count": [int(q_counts.get(q, 0)) for q in q_order]})
+        fig = px.bar(q_final, x="Quartile", y="Count", color="Quartile", text="Count",
+                     color_discrete_map={"Q1":"#16A34A","Q2":"#2563EB","Q3":"#D97706","Q4":"#DC2626"})
+        fig.update_traces(textposition="outside")
+        st.plotly_chart(fig, use_container_width=True)
+
+    with st.expander("📋 Raw Publication Data (2022+, J & C)"):
         if not f_pubs.empty:
-            trend = f_pubs.groupby(y_col_p).size().reset_index(name='Count')
-            st.plotly_chart(px.line(trend, x=y_col_p, y='Count', markers=True), use_container_width=True)
-    with c_pie:
-        st.subheader("📊 Journal vs Conference")
-        if not f_pubs.empty:
-            pie_df = f_pubs[cat_col_p].astype(str).str.capitalize().value_counts().reset_index()
-            pie_df.columns = ['Type', 'Count']
-            st.plotly_chart(px.pie(pie_df, names='Type', values='Count', hole=0.4), use_container_width=True)
+            st.dataframe(f_pubs.reset_index(drop=True), use_container_width=True)
 
-    # Faculty Productivity
-    st.subheader("🏆 Faculty Productivity (All 28 Members)")
-    p_cnt = f_pubs['Faculty'].value_counts()
-    pt_cnt = f_pats['Faculty'].value_counts()
-    prod = pd.DataFrame({'Papers': p_cnt, 'Patents': pt_cnt}).fillna(0)
-    prod['Total'] = prod['Papers'] + prod['Patents']
-    prod = prod.reindex(all_fac_list, fill_value=0).sort_values('Total', ascending=False).reset_index().rename(columns={'index':'Faculty'})
-    
-    st.plotly_chart(px.bar(prod, x='Faculty', y=['Papers', 'Patents'], barmode='stack', height=500), use_container_width=True)
+# ──────────────────────────────────────────────
+#  INDIVIDUAL PROFILE
+# ──────────────────────────────────────────────
 
-    # Heatmap
-    st.subheader("🔥 Faculty Publication Heatmap")
-    if not f_pubs.empty:
-        heat = f_pubs.groupby(['Faculty', y_col_p]).size().unstack(fill_value=0)
-        heat = heat.reindex(all_fac_list, fill_value=0)
-        st.plotly_chart(px.imshow(heat, text_auto=True, aspect="auto", color_continuous_scale="RdBu_r"), use_container_width=True)
-
-# --- INDIVIDUAL PROFILE ---
 else:
-    fac = st.sidebar.selectbox("Select Faculty", all_fac_list)
+    fac  = st.sidebar.selectbox("Select Faculty Member", all_fac)
     tabs = data_dict[fac]
-    df_p = tabs['pub']
-    
-    st.title(f"👤 Faculty Profile: {fac}")
+    df_p = tabs["pub"].copy()
 
-    if not df_p.empty:
-        # Dynamic Column Discovery
-        yc = get_col_name(df_p, ['year'])
-        cc = get_col_name(df_p, ['category'])
-        sc = get_col_name(df_p, ['status'])
-        qc = get_col_name(df_p, ['quartile'])
-        tc = get_col_name(df_p, ['title'])
+    st.title(f"👤 {fac}")
+    st.caption("Individual research profile — all years shown unless otherwise filtered")
 
-        df_p[yc] = pd.to_numeric(df_p[yc], errors='coerce')
-        # Only show core categories in charts
-        mask = df_p[cc].astype(str).str.contains("Journal|Conference", case=False, na=False)
-        df_clean = df_p[mask].copy()
+    yc = get_col(df_p, ["publication year", "year"])
+    cc = get_col(df_p, ["publication category", "category"])
+    sc = get_col(df_p, ["status"])
+    qc = get_col(df_p, ["quartile"])
+    tc = get_col(df_p, ["publication title", "title"])
+    vc_col = get_col(df_p, ["published in", "journal"])
 
-        col1, col2 = st.columns(2)
-        with col1:
-            st.subheader("📈 Publications per Year")
-            y_data = df_clean.groupby(yc).size().reset_index(name='Count')
-            st.plotly_chart(px.bar(y_data, x=yc, y='Count'), use_container_width=True)
-            
-        with col2:
-            st.subheader("📊 Category Distribution")
-            p_c = len(df_clean[df_clean[cc].astype(str).str.contains("Journal", case=False, na=False)])
-            c_c = len(df_clean[df_clean[cc].astype(str).str.contains("Conference", case=False, na=False)])
-            pat_c = len(tabs['patent'])
-            pie_v = pd.DataFrame({'Cat':['Journal','Conference','Patent'], 'Val':[p_c, c_c, pat_c]})
-            st.plotly_chart(px.pie(pie_v, names='Cat', values='Val', hole=0.4), use_container_width=True)
+    if yc:
+        df_p[yc] = pd.to_numeric(df_p[yc], errors="coerce")
 
-        col3, col4 = st.columns(2)
-        with col3:
-            st.subheader("📌 Status Analysis")
-            if sc:
-                # Clean Status: Filter out "None", empty strings, or numbers
-                s_df = df_clean.copy()
-                s_df[sc] = s_df[sc].astype(str).str.strip().str.capitalize()
-                s_df = s_df[s_df[sc].str.contains("Published|Accepted|Submi", case=False, na=False)]
-                if not s_df.empty:
-                    st.plotly_chart(px.bar(s_df[sc].value_counts().reset_index(), x='index', y=sc, labels={'index':'Status'}), use_container_width=True)
-                else: st.info("No status data (Accepted/Published/Submitted) found.")
-            else: st.warning("Status column not detected.")
+    df_core = df_p[df_p[cc].astype(str).str.contains("Journal|Conference", case=False, na=False)].copy() \
+              if cc else df_p.copy()
 
-        with col4:
-            st.subheader("🏆 Quartile Analysis")
-            if qc:
-                # Clean Quartile: Only show Q1-Q4
-                q_df = df_clean.copy()
-                q_df[qc] = q_df[qc].astype(str).str.strip().str.upper()
-                q_order = ['Q1', 'Q2', 'Q3', 'Q4']
-                q_counts = q_df[qc].value_counts()
-                q_final = pd.DataFrame({'Quartile': q_order, 'Count': [q_counts.get(q, 0) for q in q_order]})
-                st.plotly_chart(px.bar(q_final, x='Quartile', y='Count', color='Quartile'), use_container_width=True)
-            else: st.warning("Quartile column not detected.")
+    journal_count = len(df_core[df_core[cc].astype(str).str.contains("Journal",    case=False, na=False)]) if cc else 0
+    conf_count    = len(df_core[df_core[cc].astype(str).str.contains("Conference", case=False, na=False)]) if cc else 0
+    patent_count  = len(tabs["patent"])
+    grant_count   = len(tabs["grant"])
+
+    m1, m2, m3, m4, m5 = st.columns(5)
+    m1.metric("📄 Total (J+C)", journal_count + conf_count)
+    m2.metric("📰 Journals",    journal_count)
+    m3.metric("🎤 Conferences", conf_count)
+    m4.metric("🔬 Patents",     patent_count)
+    m5.metric("🏦 Grants",      grant_count)
+
+    st.divider()
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+        st.subheader("📈 Publications per Year")
+        if yc and not df_core.empty:
+            y_data = df_core.groupby(yc).size().reset_index(name="Count")
+            fig = px.bar(y_data, x=yc, y="Count", text="Count",
+                         color_discrete_sequence=["#2563EB"])
+            fig.update_traces(textposition="outside")
+            fig.update_layout(xaxis_title="Year", yaxis_title="Count")
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.info("No year data.")
+
+    with col2:
+        st.subheader("📊 Journal / Conference / Patent")
+        pie_v = pd.DataFrame({
+            "Type":  ["Journal", "Conference", "Patent"],
+            "Count": [journal_count, conf_count, patent_count]
+        })
+        fig = px.pie(pie_v, names="Type", values="Count", hole=0.42,
+                     color_discrete_sequence=["#2563EB", "#16A34A", "#D97706"])
+        st.plotly_chart(fig, use_container_width=True)
+
+    col3, col4 = st.columns(2)
+
+    with col3:
+        st.subheader("📌 Publication Status")
+        if sc and not df_core.empty:
+            s_df = df_core.copy()
+            s_df[sc] = s_df[sc].astype(str).str.strip().str.capitalize()
+            s_df = s_df[s_df[sc].str.contains("Published|Accepted|Submitted", case=False, na=False)]
+            if not s_df.empty:
+                vc_s = safe_vc(s_df[sc], label="Status")
+                fig = px.bar(vc_s, x="Status", y="Count", color="Status", text="Count",
+                             color_discrete_map={"Published":"#16A34A","Accepted":"#2563EB","Submitted":"#D97706"})
+                fig.update_traces(textposition="outside")
+                st.plotly_chart(fig, use_container_width=True)
+            else:
+                st.info("No status data (Published / Accepted / Submitted).")
+        else:
+            st.warning("Status column not detected.")
+
+    with col4:
+        st.subheader("🏆 Quartile Analysis (Journals)")
+        if qc and cc and not df_core.empty:
+            j_only = df_core[df_core[cc].astype(str).str.contains("Journal", case=False, na=False)].copy()
+            j_only[qc] = j_only[qc].astype(str).str.strip().str.upper()
+            q_order  = ["Q1", "Q2", "Q3", "Q4"]
+            q_counts = j_only[qc].value_counts()
+            q_final  = pd.DataFrame({"Quartile": q_order,
+                                      "Count": [int(q_counts.get(q, 0)) for q in q_order]})
+            fig = px.bar(q_final, x="Quartile", y="Count", color="Quartile", text="Count",
+                         color_discrete_map={"Q1":"#16A34A","Q2":"#2563EB","Q3":"#D97706","Q4":"#DC2626"})
+            fig.update_traces(textposition="outside")
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.warning("Quartile column not detected.")
+
+    with st.expander("📋 Full Publication List"):
+        if not df_p.empty:
+            display_cols = [c for c in [yc, cc, tc, vc_col, sc, qc] if c]
+            st.dataframe(df_p[display_cols].reset_index(drop=True), use_container_width=True)
+        else:
+            st.info("No publication data.")
 
     st.divider()
     s1, s2 = st.columns(2)
+
     with s1:
-        st.subheader("🎖️ Achievements / Awards")
-        for _, r in tabs['award'].iterrows(): st.markdown(f"• {next((v for v in r if len(str(v))>5), 'Award')}")
-        for _, r in tabs['stud_ach'].iterrows(): st.markdown(f"• (Student) {next((v for v in r if len(str(v))>5), 'Achievement')}")
-    with s2:
-        st.subheader("📜 Patents")
-        pt_df = tabs['patent']
+        st.subheader("🔬 Patents")
+        pt_df = tabs["patent"]
         if not pt_df.empty:
-            pt_tit = get_col_name(pt_df, ['title'])
-            pt_typ = get_col_name(pt_df, ['category', 'type'])
-            for _, r in pt_df.iterrows(): st.markdown(f"**{r[pt_tit]}** \n*Type: {r[pt_typ]}*")
-    
-    st.subheader("🏫 Workshops / Seminars")
-    ws_df = tabs['workshop']
-    if not ws_df.empty:
-        ws_t = get_col_name(ws_df, ['title'])
-        for _, r in ws_df.iterrows(): st.markdown(f"• {r[ws_t]}")
+            pt_title = get_col(pt_df, ["title"])
+            pt_cat   = get_col(pt_df, ["patent category", "category", "type"])
+            pt_year  = get_col(pt_df, ["year"])
+            for _, r in pt_df.iterrows():
+                t_val = str(r[pt_title]).strip() if pt_title else "—"
+                c_val = str(r[pt_cat]).strip()   if pt_cat   else "—"
+                y_val = str(r[pt_year]).strip()  if pt_year  else "—"
+                st.markdown(f"**{t_val}**  \n*{c_val} · {y_val}*")
+        else:
+            st.info("No patents on record.")
+
+    with s2:
+        st.subheader("🎖️ Awards & Achievements")
+        award_df = tabs["award"]
+        if not award_df.empty:
+            det_col  = get_col(award_df, ["detail", "award", "name"])
+            cat_col_a = get_col(award_df, ["category"])
+            for _, r in award_df.iterrows():
+                det = str(r[det_col]).strip()   if det_col   else "—"
+                cat_a = str(r[cat_col_a]).strip() if cat_col_a else ""
+                suffix = f" _{cat_a}_" if cat_a and cat_a not in ("nan", "") else ""
+                st.markdown(f"• **{det}**{suffix}")
+        else:
+            st.info("No awards on record.")
+
+        stud_df = tabs["stud_ach"]
+        if not stud_df.empty:
+            st.markdown("**🎓 Student Achievements (under guidance)**")
+            ach_col  = get_col(stud_df, ["achievement", "name", "detail"])
+            yr_col_s = get_col(stud_df, ["year"])
+            for _, r in stud_df.iterrows():
+                ach  = str(r[ach_col]).strip()   if ach_col   else "—"
+                yr_s = str(r[yr_col_s]).strip()  if yr_col_s  else ""
+                suffix = f" *({yr_s})*" if yr_s and yr_s not in ("nan", "") else ""
+                st.markdown(f"• {ach}{suffix}")
+
+    st.divider()
+    w1, w2 = st.columns(2)
+
+    with w1:
+        st.subheader("🏫 Workshops / Seminars Organised")
+        ws_df = tabs["workshop"]
+        if not ws_df.empty:
+            ws_title = get_col(ws_df, ["title"])
+            ws_year  = get_col(ws_df, ["year"])
+            for _, r in ws_df.iterrows():
+                t_val = str(r[ws_title]).strip() if ws_title else "—"
+                y_val = str(r[ws_year]).strip()  if ws_year  else ""
+                suffix = f" *({y_val})*" if y_val and y_val not in ("nan", "") else ""
+                st.markdown(f"• **{t_val}**{suffix}")
+        else:
+            st.info("No workshops on record.")
+
+    with w2:
+        st.subheader("🏦 Grants / Funded Projects")
+        gr_df = tabs["grant"]
+        if not gr_df.empty:
+            gr_title  = get_col(gr_df, ["title"])
+            gr_agency = get_col(gr_df, ["funding", "agency"])
+            gr_amount = get_col(gr_df, ["amount", "grant amount"])
+            gr_year   = get_col(gr_df, ["grant year", "year"])
+            for _, r in gr_df.iterrows():
+                t_val = str(r[gr_title]).strip()  if gr_title  else "—"
+                ag    = str(r[gr_agency]).strip()  if gr_agency else ""
+                amt   = str(r[gr_amount]).strip()  if gr_amount else ""
+                yr_g  = str(r[gr_year]).strip()    if gr_year   else ""
+                meta  = " · ".join(x for x in [ag, amt, yr_g] if x and x != "nan")
+                st.markdown(f"• **{t_val}**" + (f"  \n  _{meta}_" if meta else ""))
+        else:
+            st.info("No grants on record.")
