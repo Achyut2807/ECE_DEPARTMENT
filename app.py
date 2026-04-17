@@ -2,7 +2,7 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 
-st.set_page_config(layout="wide", page_title="ECE Faculty Dashboard", page_icon="📡")
+st.set_page_config(layout="wide", page_title="ICT Faculty Dashboard", page_icon="📡")
 
 # ──────────────────────────────────────────────
 #  UTILITIES
@@ -207,7 +207,7 @@ total_grant_amount = compute_combined_grant_total(df_grants, df_consult)
 #  SIDEBAR
 # ──────────────────────────────────────────────
 
-st.sidebar.title("📡 ECE Department\nPDEU")
+st.sidebar.title("📡 ICT Department\nPDEU")
 view = st.sidebar.radio("🗂️ Navigate", ["📊 Overall Dashboard", "👤 Individual Profile"])
 
 # ──────────────────────────────────────────────
@@ -215,7 +215,7 @@ view = st.sidebar.radio("🗂️ Navigate", ["📊 Overall Dashboard", "👤 Ind
 # ──────────────────────────────────────────────
 
 if view == "📊 Overall Dashboard":
-    st.title("📊 ECE Department — Faculty Dashboard (2022 – Present)")
+    st.title("📊 ICT Department — Faculty Dashboard (2022 – Present)")
     st.caption("Journals & Conferences only (unless stated) · Source: Protected_Deparment_FactSheet-2.xlsx")
 
     # KPIs — 5 columns; Grants count now includes consultancy rows
